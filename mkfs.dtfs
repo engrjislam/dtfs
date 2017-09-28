@@ -1,0 +1,85 @@
+#!/usr/bin/env python
+import argparse
+import stat
+from pyfdt.pyfdt import *
+
+# TODO UID and GID override
+# TODO perm override
+
+def dtfs_fill_stats(fnode, fstat, compatible, name):
+    fnode.add_subnode(FdtPropertyStrings("compatible", [compatible]))
+    fnode.add_subnode(FdtPropertyStrings("dtfs,name", [name.encode('utf8')]))
+    fnode.add_subnode(FdtPropertyWords("dtfs,posix-perm", [stat.S_IMODE(fstat.st_mode)]))
+    fnode.add_subnode(FdtPropertyWords("dtfs,timestamp", [fstat.st_mtime]))
+    fnode.add_subnode(FdtPropertyWords("dtfs,uid", [fstat.st_uid]))
+    fnode.add_subnode(FdtPropertyWords("dtfs,gid", [fstat.st_gid]))
+
+
+def dtfs(path):
+    root = FdtNode("/")
+    
+    fstat = os.lstat(path)
+    if not stat.S_ISDIR(fstat.st_mode):
+        raise Exception("base path is not a directory")
+    dtfs_fill_stats(root, fstat, "dtfs,rootdir-v1", "/")
+
+    if path.endswith('/'):
+        path = path[:-1]
+
+    nodes = {path: root}
+
+    for subpath, subdirs, files in os.walk(path):
+        if subpath not in nodes.keys():
+            raise Exception("os.walk error")
+        cur = nodes[subpath]
+
+        # Create a "file" node for each file
+        fcount = 0
+        for f in files:
+            fstat = os.lstat("%s/%s" % (subpath, f))
+            if stat.S_ISLNK(fstat.st_mode):
+                print("Symlink not yet managed")
+                continue
+            if not stat.S_ISREG(fstat.st_mode):
+                print("Only regular files are managed")
+                continue
+
+            fnode = FdtNode("file%d" % fcount)
+            dtfs_fill_stats(fnode, fstat, "dtfs,file-v1", f)
+
+            with open(subpath+'/'+f, 'rb') as content_file:
+                content = content_file.read()
+            fnode.add_subnode(FdtProperty.new_raw_property("dtfs,raw-content", content[:10000]))
+
+            cur.add_subnode(fnode)
+            fnode.set_parent_node(cur)
+
+            nodes["%s/%s" % (subpath, f)] = fnode
+            fcount += 1
+
+        dcount = 0
+        for subdir in subdirs:
+            dnode = FdtNode("dir%d" % dcount)
+            
+            dstat = os.lstat("%s/%s" % (subpath, subdir))
+            dtfs_fill_stats(dnode, dstat, "dtfs,dir-v1", subdir)
+
+            cur.add_subnode(dnode)
+            dnode.set_parent_node(cur)
+
+            nodes["%s/%s" % (subpath, subdir)] = dnode
+            dcount += 1
+
+    return root
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='FS to Device Tree Blob')
+    parser.add_argument('path', help="filesystem path")
+    parser.add_argument('out_filename', help="output filename")
+    args = parser.parse_args()
+
+    root = dtfs(args.path)
+    fdt = Fdt()
+    fdt.add_rootnode(root)
+    with open(args.out_filename, "wb") as outfile:
+        outfile.write(fdt.to_dtb())
